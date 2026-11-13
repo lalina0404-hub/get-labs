@@ -1,55 +1,50 @@
+import time
 import RPi.GPIO as GPIO
 import spidev
+import numpy as np
 import matplotlib.pyplot as plt
 
 
 ########################################
-# Setting up SPI device
-# and read function for MCU
+# Settings
+########################################
+
+threshold = 20      # trigger level: deviation of mic 0 from background, ADC codes
+timeout_ms = 15000  # how long Pico waits for a clap
+SPI_CS = 8
+
+
+########################################
+# Setting up SPI device and CS pin
 ########################################
 
 spi = spidev.SpiDev()
 spi.open(0, 0)
-spi.mode = 0b01
-spi.max_speed_hz = 5000000
-
-def spi_read():
-    GPIO.output(SPI_CS, 0)
-    resp = spi.xfer2([0, 0])
-    GPIO.output(SPI_CS, 1)
-    return resp[0] << 8 | resp[1]
-
-
-########################################
-# Setting up GPIO pins for MCU control
-########################################
+spi.mode = 0
+spi.max_speed_hz = 10000
+spi.no_cs = True    # CS is controlled manually
 
 GPIO.setmode(GPIO.BCM)
-
-GO_pin = 17
-is_sampled_pin = 27
-ch_select_pin = 22
-is_written_pin = 23
-SPI_CS = 8
-
-GPIO.setup(GO_pin, GPIO.OUT)
-GPIO.setup(is_sampled_pin, GPIO.IN)
-GPIO.setup(ch_select_pin, GPIO.OUT)
-GPIO.setup(is_written_pin, GPIO.IN)
 GPIO.setup(SPI_CS, GPIO.OUT)
 
-GPIO.output(GO_pin, 0)
-GPIO.output(SPI_CS, 1)
 
 ########################################
-# Defining the write function 
-# for saving samples
+# Reading one answer from Pico
+# Answer: "SND2", length (4 bytes), CRC (4 bytes), data
 ########################################
 
-def write_list(arr, file_name):
-    arr_str = list(map(str, arr))
-    with open(file_name, 'w') as file:
-        file.write('\n'.join(arr_str))
+def read_answer():
+    start = b""
+    while start != b"SND2":
+        start = (start + bytes(spi.xfer2([0])))[-4:]
+
+    header = bytes(spi.xfer2([0] * 8))
+    size = int.from_bytes(header[:4], "little")
+
+    data = bytearray()
+    while len(data) < size:
+        data.extend(spi.xfer2([0] * min(64, size - len(data))))
+    return bytes(data)
 
 
 ########################################
@@ -57,41 +52,34 @@ def write_list(arr, file_name):
 ########################################
 
 try:
-    data = [[] for _ in range(2)]
+    # Reset previous exchange and select Pico
+    GPIO.output(SPI_CS, 1)
+    time.sleep(0.06)
+    GPIO.output(SPI_CS, 0)
 
-    # GO command to MCU
-    GPIO.output(GO_pin, 1)
+    # Command to Pico: wait for a clap and record
+    spi.xfer2(list(f"capture {threshold} {timeout_ms}\n".encode()))
+    print(read_answer().decode())
+    print("Clap now!")
 
-    # Waiting for sampling to be done
-    while not GPIO.input(is_sampled_pin):
-        continue
+    # Pico sends text line with settings, then samples: mic 0, mic 1, mic 0, ...
+    answer = read_answer()
+    header, _, payload = answer.partition(b"\n")
+    print(header.decode())
 
-    # Reading from channels
-    for ch in range(2):
-        GPIO.output(ch_select_pin, ch)
-        
-        while GPIO.input(is_written_pin):
-            continue
-        while not GPIO.input(is_written_pin):
-            sample = spi_read()
-            data[ch].append(sample)
+    samples = np.frombuffer(payload, dtype="<u2").reshape(-1, 2)
+    data_0 = samples[:, 0]
+    data_1 = samples[:, 1]
 
-    # Cancelling GO command to MCU
-    GPIO.output(GO_pin, 0)
+    # Saving and showing samples
+    np.savetxt("data_0.txt", data_0, fmt="%d")
+    np.savetxt("data_1.txt", data_1, fmt="%d")
 
-    # Showing and saving samples
-    data[0].pop(0)
-    data[1].pop(0)
-
-    plt.plot(data[0]) # blue
-    plt.plot(data[1]) # orange
-
-    write_list(data[0], 'data_0.txt')
-    write_list(data[1], 'data_1.txt')
-
+    plt.plot(data_0)  # blue
+    plt.plot(data_1)  # orange
     plt.show()
 
 finally:
-    GPIO.output(GO_pin, 0)
+    GPIO.output(SPI_CS, 1)
     GPIO.cleanup()
     spi.close()
