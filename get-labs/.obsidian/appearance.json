@@ -7,5 +7,6 @@
     "Изображения по центру",
     "supercharged-links-gen",
     "concept-links"
-  ]
+  ],
+  "showRibbon": true
 }
