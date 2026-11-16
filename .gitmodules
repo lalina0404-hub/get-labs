@@ -1,0 +1,3 @@
+[submodule "Для преподавателей"]
+	path = Для преподавателей
+	url = ../get-labs-teachers.git
